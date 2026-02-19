@@ -14,6 +14,11 @@ class FirecrawlScraperPlugin(Plugin):
     """
     A plugin to scrape web pages using self-hosted Firecrawl API.
     Supports batch scraping with parallel requests and flexible configuration.
+    
+    Usage:
+    - Complements web_search: Use after getting URLs from web_search() to fetch full content
+    - Standalone: Use directly to extract text/markdown from any URL for summarization or analysis
+    - Batch processing: Scrape up to 20 URLs in parallel with configurable concurrency
     """
 
     def __init__(self):
@@ -37,7 +42,7 @@ class FirecrawlScraperPlugin(Plugin):
                 'type': 'function',
                 'function': {
                     'name': 'scrape_content',
-                    'description': 'Scrape content from multiple URLs in parallel using Firecrawl. Returns markdown, HTML, and metadata for each URL.',
+                    'description': 'Scrape content from multiple URLs in parallel using Firecrawl. Use after web_search to fetch full page content, or independently to get page text/markdown. Returns markdown, HTML, and metadata for each URL. Max 20 URLs per request.',
                     'parameters': {
                         'type': 'object',
                         'properties': {

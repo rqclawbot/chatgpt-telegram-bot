@@ -14,6 +14,11 @@ class SearxngSearchPlugin(Plugin):
     """
     A plugin to search the web using self-hosted SearXNG instance.
     Supports authentication via X-API-KEY header and multiple search types.
+    
+    Usage flow:
+    1. Use web_search() to find URLs related to a query
+    2. Pass returned URLs to scrape_content() to fetch full page content
+    3. Or use directly for quick summaries of search results
     """
 
     def __init__(self):
@@ -35,7 +40,7 @@ class SearxngSearchPlugin(Plugin):
                 'type': 'function',
                 'function': {
                     'name': 'web_search',
-                    'description': 'Execute a web search using SearXNG for the given query and return a list of results with images, news, and related searches',
+                    'description': 'Execute a web search using SearXNG for the given query and return URLs with images, news, and related searches. Use the returned URLs with scrape_content to get full page content.',
                     'parameters': {
                         'type': 'object',
                         'properties': {

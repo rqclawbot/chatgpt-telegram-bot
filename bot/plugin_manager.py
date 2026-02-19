@@ -36,8 +36,9 @@ class PluginManager:
             #'google_web_search': GoogleWebSearchPlugin,
             'ddg_image_search': DDGImageSearchPlugin,
             'dux_distributed_global_search': DDGSPlugin,
-            'firecrawl': FirecrawlScraperPlugin,
-            'searxng': SearxngSearchPlugin,
+            # Web search & scraping pipeline
+            'searxng': SearxngSearchPlugin,  # Search for URLs
+            'firecrawl': FirecrawlScraperPlugin,  # Scrape page content (use after searxng or standalone)
             # 'spotify': SpotifyPlugin,
             'worldtimeapi': WorldTimeApiPlugin,
             # 'youtube_audio_extractor': YouTubeAudioExtractorPlugin,
