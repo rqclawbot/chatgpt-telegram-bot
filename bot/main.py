@@ -138,6 +138,7 @@ def main() -> None:
         'private_rate_limit': float(os.environ.get('PRIVATE_RATE_LIMIT', '1.0')),
         'max_update_frequency': float(os.environ.get('MAX_UPDATE_FREQUENCY', '0.5')),
         'expandable_message_limit': int(os.environ.get('EXPANDABLE_MESSAGE_LIMIT', '280')),
+        'expandable_auto_collapse_seconds': int(os.environ.get('EXPANDABLE_AUTO_COLLAPSE_SECONDS', '180')),
     }
 
     if model in GPT_SEARCH_MODELS and openai_config['web_search_support_annotations']:

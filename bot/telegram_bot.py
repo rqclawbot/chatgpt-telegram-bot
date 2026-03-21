@@ -306,6 +306,7 @@ class ChatGPTTelegramBot:
         now = time.time()
         expired = [s for s, st in self.expandable_messages.items() if now - st['created_at'] > max_age_seconds]
         for s in expired:
+            self._cancel_auto_collapse(self.expandable_messages[s])
             del self.expandable_messages[s]
 
     async def help(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -660,6 +661,45 @@ class ChatGPTTelegramBot:
 
     _TOGGLE_COOLDOWN = 3  # seconds between expand/collapse toggles
 
+    async def _auto_collapse(self, seq: int, context: ContextTypes.DEFAULT_TYPE):
+        """Background task: waits, then collapses an expanded message."""
+        delay = self.config['expandable_auto_collapse_seconds']
+        if delay <= 0:
+            return
+        await asyncio.sleep(delay)
+
+        state = self.expandable_messages.get(seq)
+        if not state or not state['is_expanded']:
+            return
+
+        state['is_expanded'] = False
+        state['auto_collapse_task'] = None
+        truncation_limit = self.config['expandable_message_limit']
+        truncated = truncate_text(state['full_text'], truncation_limit)
+        try:
+            await edit_message_with_retry(
+                context,
+                state['chat_id'],
+                str(state['msg_id']),
+                text=truncated,
+                markdown=True,
+                reply_markup=_make_expand_markup(seq),
+            )
+        except Exception:
+            pass
+
+    def _schedule_auto_collapse(self, seq: int, state: dict, context: ContextTypes.DEFAULT_TYPE):
+        """Cancel any existing auto-collapse timer and schedule a new one."""
+        if state.get('auto_collapse_task'):
+            state['auto_collapse_task'].cancel()
+        state['auto_collapse_task'] = asyncio.create_task(self._auto_collapse(seq, context))
+
+    def _cancel_auto_collapse(self, state: dict):
+        """Cancel a pending auto-collapse timer."""
+        if state.get('auto_collapse_task'):
+            state['auto_collapse_task'].cancel()
+            state['auto_collapse_task'] = None
+
     async def handle_expand_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         seq = int(query.data.split(':')[1])
@@ -690,6 +730,7 @@ class ChatGPTTelegramBot:
                 )
             except Exception:
                 pass  # streaming loop will catch up
+            self._schedule_auto_collapse(seq, state, context)
             return
 
         await edit_message_with_retry(
@@ -700,6 +741,7 @@ class ChatGPTTelegramBot:
             markdown=True,
             reply_markup=_make_collapse_markup(seq),
         )
+        self._schedule_auto_collapse(seq, state, context)
 
     async def handle_collapse_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -708,6 +750,8 @@ class ChatGPTTelegramBot:
         if not state:
             await query.answer('Message expired.')
             return
+
+        self._cancel_auto_collapse(state)
 
         now = time.time()
         if now - state['last_toggled'] < self._TOGGLE_COOLDOWN:
@@ -1272,6 +1316,7 @@ class ChatGPTTelegramBot:
                             'is_streaming': True,
                             'created_at': time.time(),
                             'last_toggled': 0,
+                            'auto_collapse_task': None,
                         }
                 except Exception as e:
                     logging.warning(f'Failed to send first message in chat {chat_id}: {e}')
@@ -1720,6 +1765,7 @@ class ChatGPTTelegramBot:
                                         'is_streaming': False,
                                         'created_at': time.time(),
                                         'last_toggled': 0,
+                                        'auto_collapse_task': None,
                                     }
                             else:
                                 logging.error('Failed to send chunk due to rate limits even after waiting')
