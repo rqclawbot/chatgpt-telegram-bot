@@ -704,7 +704,11 @@ class ChatGPTTelegramBot:
         # Schedule auto-collapse after timeout
         auto_collapse_delay = self.config.get('auto_collapse_delay', 60)
         if auto_collapse_delay > 0:
-            asyncio.ensure_future(self._auto_collapse(context, seq, auto_collapse_delay))
+            task = asyncio.get_event_loop().create_task(
+                self._auto_collapse(context, seq, auto_collapse_delay)
+            )
+            # Keep a reference to prevent the task from being garbage collected mid-execution
+            state['auto_collapse_task'] = task
 
     async def _auto_collapse(self, context: ContextTypes.DEFAULT_TYPE, seq: int, delay: int):
         """Automatically collapse an expanded message after a delay."""
@@ -744,6 +748,11 @@ class ChatGPTTelegramBot:
 
         state['is_expanded'] = False
         await query.answer()
+
+        # Cancel any pending auto-collapse task
+        task = state.pop('auto_collapse_task', None)
+        if task and not task.done():
+            task.cancel()
 
         # Truncated text is stable — text[:limit] never changes during streaming,
         # so we can collapse immediately without a waiting state.
