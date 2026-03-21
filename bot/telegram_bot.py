@@ -701,6 +701,33 @@ class ChatGPTTelegramBot:
             reply_markup=_make_collapse_markup(seq),
         )
 
+        # Schedule auto-collapse after timeout
+        auto_collapse_delay = self.config.get('auto_collapse_delay', 60)
+        if auto_collapse_delay > 0:
+            asyncio.ensure_future(self._auto_collapse(context, seq, auto_collapse_delay))
+
+    async def _auto_collapse(self, context: ContextTypes.DEFAULT_TYPE, seq: int, delay: int):
+        """Automatically collapse an expanded message after a delay."""
+        await asyncio.sleep(delay)
+        state = self.expandable_messages.get(seq)
+        if not state or not state['is_expanded'] or state['is_streaming']:
+            return
+        state['is_expanded'] = False
+        state['last_toggled'] = time.time()
+        truncation_limit = self.config['expandable_message_limit']
+        truncated = truncate_text(state['full_text'], truncation_limit)
+        try:
+            await edit_message_with_retry(
+                context,
+                state['chat_id'],
+                str(state['msg_id']),
+                text=truncated,
+                markdown=True,
+                reply_markup=_make_expand_markup(seq),
+            )
+        except Exception:
+            pass  # message may have been deleted or already collapsed
+
     async def handle_collapse_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         seq = int(query.data.split(':')[1])
