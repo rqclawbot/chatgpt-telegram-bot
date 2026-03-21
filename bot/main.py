@@ -137,6 +137,7 @@ def main() -> None:
         'group_rate_limit': int(os.environ.get('GROUP_RATE_LIMIT', '20')),
         'private_rate_limit': float(os.environ.get('PRIVATE_RATE_LIMIT', '1.0')),
         'max_update_frequency': float(os.environ.get('MAX_UPDATE_FREQUENCY', '0.5')),
+        'expandable_message_limit': int(os.environ.get('EXPANDABLE_MESSAGE_LIMIT', '280')),
     }
 
     if model in GPT_SEARCH_MODELS and openai_config['web_search_support_annotations']:

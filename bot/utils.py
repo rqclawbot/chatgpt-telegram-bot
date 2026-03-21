@@ -5,6 +5,7 @@ import base64
 import itertools
 import json
 import logging
+import re
 from typing import Callable, Optional
 
 import telegram
@@ -100,6 +101,35 @@ def split_into_chunks(text: str, chunk_size: int = 4096) -> list[str]:
     return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
 
 
+def truncate_text(text: str, limit: int = 280) -> str:
+    """
+    Truncate text at a natural boundary at or before `limit` characters.
+    Searches backward from the limit for: sentence ending > paragraph break > word boundary.
+    """
+    if len(text) <= limit:
+        return text
+
+    region = text[:limit]
+
+    # Priority 1: last sentence ending (. ! ? followed by space or newline)
+    m = list(re.finditer(r'[.!?](?:\s|$)', region))
+    if m:
+        return region[: m[-1].end()].rstrip() + '\n...'
+
+    # Priority 2: last paragraph break
+    para_idx = region.rfind('\n\n')
+    if para_idx > 0:
+        return region[:para_idx].rstrip() + '\n...'
+
+    # Priority 3: last word boundary
+    space_idx = region.rfind(' ')
+    if space_idx > 0:
+        return region[:space_idx].rstrip() + '\n...'
+
+    # Fallback: hard cut
+    return region + '...'
+
+
 async def wrap_with_indicator(
     update: Update,
     context: CallbackContext,
@@ -129,6 +159,7 @@ async def edit_message_with_retry(
     text: str,
     markdown: bool = True,
     is_inline: bool = False,
+    reply_markup=None,
 ):
     """
     Edit a message with retry logic in case of failure (e.g. broken markdown)
@@ -138,6 +169,7 @@ async def edit_message_with_retry(
     :param text: The text to edit the message with
     :param markdown: Whether to use markdown parse mode
     :param is_inline: Whether the message to edit is an inline message
+    :param reply_markup: Optional inline keyboard markup
     :return: None
     """
     try:
@@ -148,6 +180,7 @@ async def edit_message_with_retry(
             text=sanitize_telegram_html(text),
             parse_mode=constants.ParseMode.HTML if markdown else None,
             disable_web_page_preview=True,
+            reply_markup=reply_markup,
         )
     except telegram.error.BadRequest as e:
         if str(e).startswith('Message is not modified'):
@@ -158,6 +191,7 @@ async def edit_message_with_retry(
                 message_id=int(message_id) if not is_inline else None,
                 inline_message_id=message_id if is_inline else None,
                 text=html_to_text_pretty(text),
+                reply_markup=reply_markup,
             )
         except Exception as e:
             logging.warning(f'Failed to edit message: {str(e)}')

@@ -67,8 +67,22 @@ from utils import (
     is_within_budget,
     message_text,
     split_into_chunks,
+    truncate_text,
     wrap_with_indicator,
 )
+
+
+def _make_expand_markup(seq: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton('Show more', callback_data=f'x:{seq}')]])
+
+
+def _make_collapse_markup(seq: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton('Show less', callback_data=f'c:{seq}')]])
+
+
+def _make_waiting_markup(expanding: bool = True) -> InlineKeyboardMarkup:
+    text = 'Expanding...' if expanding else 'Collapsing...'
+    return InlineKeyboardMarkup([[InlineKeyboardButton(text, callback_data='_noop')]])
 
 
 class RateLimiter:
@@ -186,6 +200,10 @@ class ChatGPTTelegramBot:
                 command='reset',
                 description=localized_text('reset_description', bot_language),
             ),
+            BotCommand(
+                command='collapse',
+                description='Toggle short messages with "Show more" button',
+            ),
             # BotCommand(
             #     command='stats',
             #     description=localized_text('stats_description', bot_language),
@@ -230,6 +248,9 @@ class ChatGPTTelegramBot:
         self.bot_message_ids = set()
         self.pending_quality_confirmations = {}  # Store pending confirmations
         self.forum_topic_icon_stickers = {}
+        self._expandable_seq = 0
+        self.expandable_messages = {}
+        self.collapse_enabled = {}  # {chat_id: bool} — per-chat toggle for expand/collapse
 
     def get_thread_id(self, update: Update) -> str:
         c = update.effective_chat.id
@@ -280,6 +301,12 @@ class ChatGPTTelegramBot:
             return
 
         self.replies_tracker[msg.message_id] = self.get_real_thread_id(update)
+
+    def _cleanup_expandable_messages(self, max_age_seconds=3600):
+        now = time.time()
+        expired = [s for s, st in self.expandable_messages.items() if now - st['created_at'] > max_age_seconds]
+        for s in expired:
+            del self.expandable_messages[s]
 
     async def help(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         """
@@ -472,6 +499,35 @@ class ChatGPTTelegramBot:
         )
         self.save_reply(sent_msg, update)
 
+    def _is_collapse_enabled(self, update: Update) -> bool:
+        """Check if collapse/expand is enabled for this chat. Default: ON in groups, OFF in private."""
+        chat_id = update.effective_chat.id
+        if chat_id in self.collapse_enabled:
+            return self.collapse_enabled[chat_id]
+        return is_group_chat(update)
+
+    async def collapse(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Toggle the collapse (short messages) feature for this chat."""
+        if not await is_allowed(self.config, update, context):
+            await self.send_disallowed_message(update, context)
+            return
+
+        chat_id = update.effective_chat.id
+        current = self._is_collapse_enabled(update)
+        self.collapse_enabled[chat_id] = not current
+
+        if self.collapse_enabled[chat_id]:
+            text = 'Collapse mode <b>enabled</b>. Long messages will be shortened with a "Show more" button.'
+        else:
+            text = 'Collapse mode <b>disabled</b>. Messages will be shown in full.'
+
+        sent_msg = await update.effective_message.reply_text(
+            message_thread_id=get_forum_thread_id(update),
+            text=text,
+            parse_mode=constants.ParseMode.HTML,
+        )
+        self.save_reply(sent_msg, update)
+
     def _get_quality_reply_markup(self, prompt_id):
         if prompt_id not in self.image_quality_cache or 'highest' not in self.image_quality_cache[prompt_id]:
             return None
@@ -601,6 +657,82 @@ class ChatGPTTelegramBot:
             caption=original_caption,
             reply_markup=self._get_quality_reply_markup(prompt_id),
         )
+
+    _TOGGLE_COOLDOWN = 3  # seconds between expand/collapse toggles
+
+    async def handle_expand_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        seq = int(query.data.split(':')[1])
+        state = self.expandable_messages.get(seq)
+        if not state:
+            await query.answer('Message expired.')
+            return
+
+        now = time.time()
+        if now - state['last_toggled'] < self._TOGGLE_COOLDOWN:
+            await query.answer('Please wait a moment.')
+            return
+        state['last_toggled'] = now
+
+        state['is_expanded'] = True
+        await query.answer()
+
+        if state['is_streaming']:
+            # Immediate UI feedback: show current content with a waiting button
+            try:
+                await edit_message_with_retry(
+                    context,
+                    state['chat_id'],
+                    str(state['msg_id']),
+                    text=state['full_text'],
+                    markdown=False,
+                    reply_markup=_make_waiting_markup(),
+                )
+            except Exception:
+                pass  # streaming loop will catch up
+            return
+
+        await edit_message_with_retry(
+            context,
+            state['chat_id'],
+            str(state['msg_id']),
+            text=state['full_text'],
+            markdown=True,
+            reply_markup=_make_collapse_markup(seq),
+        )
+
+    async def handle_collapse_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        seq = int(query.data.split(':')[1])
+        state = self.expandable_messages.get(seq)
+        if not state:
+            await query.answer('Message expired.')
+            return
+
+        now = time.time()
+        if now - state['last_toggled'] < self._TOGGLE_COOLDOWN:
+            await query.answer('Please wait a moment.')
+            return
+        state['last_toggled'] = now
+
+        state['is_expanded'] = False
+        await query.answer()
+
+        # Truncated text is stable — text[:limit] never changes during streaming,
+        # so we can collapse immediately without a waiting state.
+        truncation_limit = self.config['expandable_message_limit']
+        truncated = truncate_text(state['full_text'], truncation_limit)
+        await edit_message_with_retry(
+            context,
+            state['chat_id'],
+            str(state['msg_id']),
+            text=truncated,
+            markdown=not state['is_streaming'],
+            reply_markup=_make_expand_markup(seq),
+        )
+
+    async def _handle_noop_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
 
     async def image(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -1020,6 +1152,10 @@ class ChatGPTTelegramBot:
         is_group = is_group_chat(update)
         str_chat_id = str(chat_id)
         total_tokens = 0
+        expandable_seq = None
+        truncation_limit = self.config['expandable_message_limit'] if self._is_collapse_enabled(update) else 0
+
+        self._cleanup_expandable_messages()
 
         stream_iter = stream_response.__aiter__()
         pending: tuple | None = None
@@ -1046,6 +1182,7 @@ class ChatGPTTelegramBot:
                 prev = ''
                 sent_message = None
                 completed_chunks = 0
+                expandable_seq = None
                 continue
 
             if len(content.strip()) == 0:
@@ -1124,6 +1261,18 @@ class ChatGPTTelegramBot:
                         text=content,
                     )
                     self.save_reply(sent_message, update)
+                    if truncation_limit > 0:
+                        self._expandable_seq += 1
+                        expandable_seq = self._expandable_seq
+                        self.expandable_messages[expandable_seq] = {
+                            'chat_id': chat_id,
+                            'msg_id': sent_message.message_id,
+                            'full_text': content,
+                            'is_expanded': False,
+                            'is_streaming': True,
+                            'created_at': time.time(),
+                            'last_toggled': 0,
+                        }
                 except Exception as e:
                     logging.warning(f'Failed to send first message in chat {chat_id}: {e}')
                     continue
@@ -1140,13 +1289,27 @@ class ChatGPTTelegramBot:
                     if not should_update:
                         continue
 
+                    # Determine display text and markup based on expand/collapse state
+                    display_text = content
+                    reply_markup = None
+                    state = self.expandable_messages.get(expandable_seq) if expandable_seq else None
+                    if state:
+                        state['full_text'] = content
+                    if truncation_limit > 0 and len(content) > truncation_limit and state:
+                        if state['is_expanded']:
+                            reply_markup = _make_collapse_markup(expandable_seq)
+                        else:
+                            display_text = truncate_text(content, truncation_limit)
+                            reply_markup = _make_expand_markup(expandable_seq)
+
                     use_markdown = tokens != 'not_finished'
                     await edit_message_with_retry(
                         context,
                         chat_id,
                         str(sent_message.message_id),
-                        text=content,
+                        text=display_text,
                         markdown=use_markdown,
+                        reply_markup=reply_markup,
                     )
 
                 except RetryAfter as e:
@@ -1165,6 +1328,10 @@ class ChatGPTTelegramBot:
 
             if tokens != 'not_finished':
                 total_tokens = int(tokens)
+
+        # Mark streaming complete so callback handlers can edit directly
+        if expandable_seq and expandable_seq in self.expandable_messages:
+            self.expandable_messages[expandable_seq]['is_streaming'] = False
 
         return total_tokens
 
@@ -1510,8 +1677,20 @@ class ChatGPTTelegramBot:
                     # Check if we're in a group
                     is_group = is_group_chat(update)
                     str_chat_id = str(chat_id)
+                    truncation_limit = (
+                        self.config['expandable_message_limit'] if self._is_collapse_enabled(update) else 0
+                    )
 
                     for index, chunk in enumerate(chunks):
+                        # For the first chunk, apply expand/collapse truncation
+                        display_text = chunk
+                        chunk_markup = None
+                        if index == 0 and truncation_limit > 0 and len(chunk) > truncation_limit:
+                            self._expandable_seq += 1
+                            seq = self._expandable_seq
+                            display_text = truncate_text(chunk, truncation_limit)
+                            chunk_markup = _make_expand_markup(seq)
+
                         try:
                             # Check rate limits before sending
                             can_send = await self.rate_limiter.check_and_wait(str_chat_id, is_group)
@@ -1525,11 +1704,23 @@ class ChatGPTTelegramBot:
                                     reply_to_message_id=get_reply_to_message_id(self.config, update)
                                     if index == 0
                                     else None,
-                                    text=chunk,
+                                    text=display_text,
                                     parse_mode=constants.ParseMode.HTML,
                                     disable_web_page_preview=True,
+                                    reply_markup=chunk_markup,
                                 )
                                 self.save_reply(sent_msg, update)
+                                # Store expandable state after we have the msg_id
+                                if chunk_markup:
+                                    self.expandable_messages[seq] = {
+                                        'chat_id': chat_id,
+                                        'msg_id': sent_msg.message_id,
+                                        'full_text': chunk,
+                                        'is_expanded': False,
+                                        'is_streaming': False,
+                                        'created_at': time.time(),
+                                        'last_toggled': 0,
+                                    }
                             else:
                                 logging.error('Failed to send chunk due to rate limits even after waiting')
                         except Exception:
@@ -1988,6 +2179,7 @@ class ChatGPTTelegramBot:
         )
 
         application.add_handler(CommandHandler('reset', self.reset))
+        application.add_handler(CommandHandler('collapse', self.collapse))
         application.add_handler(CommandHandler('image', self.image))
         application.add_handler(CommandHandler('tts', self.tts))
         # application.add_handler(CommandHandler('start', self.help))
@@ -2023,6 +2215,9 @@ class ChatGPTTelegramBot:
         application.add_handler(CallbackQueryHandler(self.handle_show_quality, pattern='^show_quality:'))
         application.add_handler(CallbackQueryHandler(self.handle_quality_confirmation, pattern='^confirm_quality:'))
         application.add_handler(CallbackQueryHandler(self.handle_quality_cancel, pattern='^cancel_quality:'))
+        application.add_handler(CallbackQueryHandler(self.handle_expand_message, pattern='^x:'))
+        application.add_handler(CallbackQueryHandler(self.handle_collapse_message, pattern='^c:'))
+        application.add_handler(CallbackQueryHandler(self._handle_noop_callback, pattern='^_noop$'))
         application.add_handler(
             InlineQueryHandler(
                 self.inline_query,
