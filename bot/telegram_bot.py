@@ -1089,7 +1089,7 @@ class ChatGPTTelegramBot:
             try:
                 audio_track = AudioSegment.from_file(filename)
                 # FIXME do not save to file
-                audio_track.export(filename_mp3, format='mp3')
+                audio_track.export(filename_mp3, format='mp3', codec='libmp3lame', bitrate='128k')
                 logging.info(
                     f'New transcribe request received from user {update.message.from_user.name} '
                     f'(id: {update.message.from_user.id})'
